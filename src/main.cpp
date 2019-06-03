@@ -108,46 +108,95 @@ int main() {
           int prev_size = previous_path_x.size(); 
 
           /*
-          * -------------------------------SENSOR FUSION------------------------------------------ 
+          * -------------------------------SENSOR FUSION--------------------------------------------- 
           * 1. we will look around the ego vehicle, and check the status of other vehicles on the road
+          * 2. specifically, we look at if the car's in front of us, left to us or right to us. 
           */
 
           // re-assign value to car_s if previous path was not empty 
           if (prev_size > 0 ){
             car_s = end_path_s; 
           }
-
           // define a flag for closeness check 
           bool too_close = false; 
 
+          // define a flag for the relative postion of the car
+          // car_front: the car is in front of us, and it is too close 
+          // car_left: the car is to the left of us, and a lane change can not be excuted. 
+          // car_right: the car is to the right of us, and a lane change can not be excuted. 
+          bool car_front = false;  
+          bool car_left = false; 
+          bool car_right = false; 
+
           // loop over the sensor function result to check other vehicle's behavior 
           for (int i = 0; i < sensor_fusion.size(); i++){
-              // check if the car is current in my lane
-              // | --- | --- | --- | (each | represets a lane, in our case, we use the range of d to determine the lane position)
-              float d = sensor_fusion[i][6]; 
-              if (d > (2+4*lane-2) && d < (2+4*lane+2)){
-                double vx = sensor_fusion[i][3];
-                double vy = sensor_fusion[i][4];
-                double check_speed = sqrt(vx*vx + vy*vy); 
-                double check_car_s = sensor_fusion[i][5];   
+            // check if the car is current in my lane, initialize car_lane as "-1"
+            // | --- | --- | --- | (each | represets a lane, in our case, we use the range of d to determine the lane position)
+            int car_lane = -1; 
+            
+            // read in the lateral position of the car "d"
+            float d = sensor_fusion[i][6]; 
 
-                check_car_s += (double)prev_size*0.02*check_speed; 
+            // determine the car_lane using logic 
+            if (d > 0 && d < 4){
+              car_lane = 0; 
+            } else if (d > 4 && d < 8){
+              car_lane = 1; 
+            } else if (d > 8 && d < 12){
+              car_lane = 2; 
+            }
+            
+            // note that if the car's d is not with the range of (0, 12), we don't need to think about it
+            if (car_lane < 0) continue; 
 
-                if (check_car_s > car_s && check_car_s-car_s < 30){
-                  too_close = true; 
-                  if (lane > 0) lane--; 
-                }
+            // next we need to compute the speed of the car "v" & and its longitudinal displacement "s"
+            double vx = sensor_fusion[i][3];
+            double vy = sensor_fusion[i][4];
+            double check_speed = sqrt(vx*vx + vy*vy); 
+            double check_car_s = sensor_fusion[i][5];   
 
-              }
+            // predict the future car's position after executing previous trajecotry 
+            check_car_s += (double)prev_size*0.02*check_speed;
+
+            // update the flags of the relative position 
+
+            if (car_lane == lane){
+              // the vehicle is in the same lane as the EGO vehicle 
+              car_front |= check_car_s > car_s && check_car_s - car_s < 30; 
+            } else if (car_lane - lane == -1){
+              // the vehicle is to the left of the EGO vehicle
+              car_left |=  check_car_s > car_s - 30 && check_car_s < car_s + 30; 
+            } else if (car_lane - lane == 1){
+              // the vehicle is to the right of the EGO vehicle
+              car_right |= check_car_s > car_s - 30 && check_car_s < car_s + 30; 
+            }
           }
 
-          if (too_close){
-            ref_v -= 0.224;
-          }
-          else if (ref_v < 49.5){
-            ref_v += 0.224; 
+          // ---------------------------------- PART II: Behavior Planning ------------------------------------------
+          // case A: there is a slow vehicle in front of us
+          if (car_front){
+            // case A-1: we are not on the leftmost lane and the left lane is empty 
+            if (!car_left && lane > 0){
+              lane --; // we do a left lane chang since it is usually faster 
+            } else if (!car_right && lane < 2){
+            // case A-2: we are not on the rightmost lane and the right lane is empty  
+              lane ++; 
+            } else {
+            // case A-3: if both left and right lanes are occupied by vehicles, we have to slow down
+              ref_v -= 0.224;   
+            }
+          // case B: there is no vehicle in front of us, we just need to drive normally  
+          } else {
+            // the EGO car is not on the center lane and its good to do a lane change. 
+            if (lane != 1 && ((lane == 0 && !car_right) || (lane == 2 && !car_left))){
+              lane = 1; 
+            }
+            if (ref_v < 49.5){
+              ref_v += 0.224; 
+            }
           }
 
+          // ---------------------------------- PART III: Trajectory Generation --------------------------------------
           // we first created some widely spread (x,y) waypoints to generate an outline, and later
           // using a spline to interpolate the waypoints in between. 
           vector<double> ptsx; 
